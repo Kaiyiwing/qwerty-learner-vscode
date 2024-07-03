@@ -72,7 +72,12 @@ export default class PluginState {
       dictKey: this._dictKey,
     }
   }
-
+  getCurrentWord(): string {
+    return this.currentWord.name;
+  }
+  getCurrentTranslation(): string {
+      return this.currentWord.trans.join('; ');
+  }
   get chapter(): number {
     return this._chapter
   }
