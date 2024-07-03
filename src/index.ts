@@ -6,12 +6,15 @@ import { getConfig } from './utils'
 import { soundPlayer } from './sound'
 import { voicePlayer } from './resource/voice'
 import PluginState from './utils/PluginState'
+import * as fs from 'fs';
+import * as path from 'path';
 
 const PLAY_VOICE_COMMAND = 'qwerty-learner.playVoice'
 const PREV_WORD_COMMAND = 'qwerty-learner.prevWord'
 const NEXT_WORD_COMMAND = 'qwerty-learner.nextWord'
 const TOGGLE_TRANSLATION_COMMAND = 'qwerty-learner.toggleTranslation'
 const TOGGLE_DIC_NAME_COMMAND = 'qwerty-learner.toggleDicName'
+const OPEN_WRONG_WORDS_COMMAND = 'qwerty-learner.openWrongWords'
 
 export function activate(context: vscode.ExtensionContext) {
   const pluginState = new PluginState(context)
@@ -22,6 +25,7 @@ export function activate(context: vscode.ExtensionContext) {
   const translationBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, -103)
   const prevWord = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, -104)
   const nextWord = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, -105)
+  const wrongWords = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, -106)
   prevWord.text = '<'
   prevWord.tooltip = '切换上一个单词'
   prevWord.command = PREV_WORD_COMMAND
@@ -34,54 +38,108 @@ export function activate(context: vscode.ExtensionContext) {
   translationBar.command = TOGGLE_TRANSLATION_COMMAND
   wordBar.command = TOGGLE_DIC_NAME_COMMAND
   wordBar.tooltip = '隐藏/显示字典名称'
+  wrongWords.text = '错词本'
+  wrongWords.tooltip = '点击打开错词本'
+  wrongWords.command = OPEN_WRONG_WORDS_COMMAND
 
-  vscode.workspace.onDidChangeTextDocument((e) => {
-    if (!pluginState.isStart) {
-      return
+  function logWrongWord(word: string, translation: string) {
+    const filePath = path.join(__dirname, 'wrong_words.txt');
+
+    let fileContent = '';
+    try {
+        fileContent = fs.readFileSync(filePath, 'utf8');
+    } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
     }
 
-    if (pluginState.readOnlyMode) {
-      return
+    const lines = fileContent.split('\n').filter(line => line.trim() !== '');
+    const wordMap: { [key: string]: { translation: string, count: number } } = {};
+    lines.forEach(line => {
+        const parts = line.split(' ');
+        const count = parseInt(parts.pop()!, 10);
+        const translation = parts.pop()!;
+        const word = parts.join(' ');
+        wordMap[word] = { translation, count };
+    });
+
+    if (wordMap[word]) {
+        wordMap[word].count += 1;
+    } else {
+        wordMap[word] = { translation, count: 1 };
     }
 
-    const { uri } = e.document
-    // 避免破坏配置文件
-    if (uri.scheme.indexOf('vscode') !== -1) {
-      return
-    }
+    const newLines = Object.keys(wordMap)
+        .map(word => `${word} ${wordMap[word].translation} ${wordMap[word].count}`)
+        .sort((a, b) => {
+            const countA = parseInt(a.split(' ').pop()!, 10);
+            const countB = parseInt(b.split(' ').pop()!, 10);
+            return countB - countA;
+        });
 
-    const { range, text, rangeLength } = e.contentChanges[0]
-    if (!(text !== '' && text.length === 1)) {
-      return
-    }
-    // 删除用户输入的字符
-    const newRange = new vscode.Range(range.start.line, range.start.character, range.end.line, range.end.character + 1)
-    const editAction = new vscode.WorkspaceEdit()
-    editAction.delete(uri, newRange)
-    vscode.workspace.applyEdit(editAction)
-    if (pluginState.hasWrong) {
-      return
-    }
-    soundPlayer('click')
-    inputBar.text = pluginState.getCurrentInputBarContent(text)
+    fs.writeFileSync(filePath, newLines.join('\n'), 'utf8');
+    console.log(`单词 "${word}" 和翻译 "${translation}" 已记录.`);
+}
 
-    const compareResult = pluginState.compareResult
-    if (compareResult === -2) {
-      // 用户完成单词输入
-      soundPlayer('success')
-      pluginState.finishWord()
-      initializeBar()
-    } else if (compareResult >= 0) {
-      pluginState.wrongInput()
-      inputBar.color = pluginState.highlightWrongColor
-      soundPlayer('wrong')
+
+
+
+vscode.workspace.onDidChangeTextDocument((e) => {
+  if (!pluginState.isStart) {
+      return;
+  }
+
+  if (pluginState.readOnlyMode) {
+      return;
+  }
+
+  const { uri } = e.document;
+
+  if (uri.scheme.indexOf('vscode') !== -1) {
+      return;
+  }
+
+  const { range, text, rangeLength } = e.contentChanges[0];
+
+  if (!(text !== '' && text.length === 1)) {
+      return;
+  }
+
+  const newRange = new vscode.Range(range.start.line, range.start.character, range.end.line, range.end.character + 1);
+  const editAction = new vscode.WorkspaceEdit();
+  editAction.delete(uri, newRange);
+  vscode.workspace.applyEdit(editAction);
+
+  if (pluginState.hasWrong) {
+      return;
+  }
+
+  soundPlayer('click');
+  inputBar.text = pluginState.getCurrentInputBarContent(text);
+
+  const compareResult = pluginState.compareResult;
+
+  if (compareResult === -2) {
+      soundPlayer('success');
+      pluginState.finishWord();
+      initializeBar();
+  } else if (compareResult >= 0) {
+      pluginState.wrongInput();
+      inputBar.color = pluginState.highlightWrongColor;
+      soundPlayer('wrong');
+
+      // 调用记录正确单词和翻译的函数
+      const currentWord = pluginState.getCurrentWord();
+      const translation = pluginState.getCurrentTranslation()
+      logWrongWord(currentWord, translation);
+
       setTimeout(() => {
-        pluginState.clearWrong()
-        inputBar.color = undefined
-        initializeBar()
-      }, pluginState.highlightWrongDelay)
-    }
-  })
+          pluginState.clearWrong();
+          inputBar.color = undefined;
+          initializeBar();
+      }, pluginState.highlightWrongDelay);
+  }e
+});
+
 
   vscode.workspace.onDidChangeConfiguration((event) => {
     if (event.affectsConfiguration('qwerty-learner.placeholder')) {
@@ -108,6 +166,7 @@ export function activate(context: vscode.ExtensionContext) {
           prevWord.show()
           nextWord.show()
           translationBar.show()
+          wrongWords.show()
           if (pluginState.readOnlyMode) {
             setUpReadOnlyInterval()
           }
@@ -118,6 +177,7 @@ export function activate(context: vscode.ExtensionContext) {
           prevWord.hide()
           nextWord.hide()
           translationBar.hide()
+          wrongWords.hide()
           removeReadOnlyInterval()
         }
       }),
@@ -179,6 +239,19 @@ export function activate(context: vscode.ExtensionContext) {
           vscode.window.showInformationMessage('章节循环模式已关闭')
         }
       }),
+      // 注册打开错词本的命令
+      vscode.commands.registerCommand(OPEN_WRONG_WORDS_COMMAND, () => {
+        const filePath = path.join(__dirname, 'wrong_words.txt');
+        fs.exists(filePath, (exists) => {
+          if (!exists) {
+            fs.writeFile(filePath, '', (error) => {})
+          }
+        });
+
+        vscode.workspace.openTextDocument(filePath).then(doc => {
+            vscode.window.showTextDocument(doc);
+        });
+    })
     ],
   )
 
@@ -196,6 +269,7 @@ export function activate(context: vscode.ExtensionContext) {
       })
     }
   }
+  
   function setUpWordBar() {
     wordBar.text = pluginState.getInitialWordBarContent()
     playVoice()
